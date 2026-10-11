@@ -2,7 +2,25 @@
 
 This repo also publishes GitHub Releases. This file is the repo-root release surface for operators who want the recent release arc without leaving the checkout.
 
-## Unreleased
+## v1.0.0-rc.3 - 2026-10-11
+
+### Reasoning accounting and profile-scoped configuration
+
+- Integrate upstream PR #666: include provider-visible reasoning in message token
+  estimates, persist the reasoning sidecar across reloads, and keep context-engine
+  discovery inside the host scan window. Prefer `reasoning_content` over the
+  internal `reasoning` alias rather than counting the same text twice.
+- Apply existing opt-in sensitive-text redaction to persisted reasoning as well.
+  Reasoning is not added to conversational full-text search. Existing rows are not
+  rewritten or backfilled; schema v5 gains an optional nullable column.
+- Address upstream issue #667 using Hermes task-local configuration APIs: external
+  cron workers retain the routed profile's LCM settings, and YAML comes from the
+  current profile home. Older hosts retain environment support; a missing-scope
+  guard is never bypassed by another profile's process-global values.
+- Update managed installation instructions for official Hermes and Card 1.5.x.
+  No maintained core overlay or private plugin-update flags are required.
+- The following previously unreleased storage and compression fixes are included.
+
 
 ### Reject boolean token limits — 2026-10-05
 

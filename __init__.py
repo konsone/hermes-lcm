@@ -24,7 +24,9 @@ def get_recall_policy() -> str:
 
 
 def _env_flag_enabled(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
+    from .config import read_lcm_env
+
+    value = read_lcm_env(name)
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}

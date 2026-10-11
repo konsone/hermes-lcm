@@ -3,7 +3,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-RELEASE_VERSION = "1.0.0-rc.2"
+RELEASE_VERSION = "1.0.0-rc.3"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RELEASE_VERSION}.md"
 
 
@@ -77,6 +77,7 @@ def test_upgrade_guide_covers_stable_and_prerelease_paths():
         in readme
     )
     assert "## Upgrade from v1.0.0-rc.1 to v1.0.0-rc.2" in operator_guide
+    assert "## Upgrade to v1.0.0-rc.3" in operator_guide
 
 
 def test_preanswer_guide_discloses_inherited_embedding_provider_behavior():
@@ -96,9 +97,9 @@ def test_release_candidate_notes_cover_only_the_merged_release_scope():
     notes = RELEASE_NOTES.read_text(encoding="utf-8")
 
     assert notes.startswith(f"# hermes-lcm v{RELEASE_VERSION}\n")
-    assert "#630" in notes
-    assert "#633" in notes
-    assert "#635" in notes
+    assert "#666" in notes
+    assert "#667" in notes
+    assert "#662" in notes
     assert "## Highlights" in notes
     assert "## Changes" in notes
     assert "## Contributors" in notes

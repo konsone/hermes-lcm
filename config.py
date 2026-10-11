@@ -15,6 +15,21 @@ except Exception:  # pragma: no cover - optional fallback for minimal installs
 logger = logging.getLogger(__name__)
 
 
+def read_lcm_env(key: str, default=None):
+    """Read an LCM setting in the host's current profile scope.
+
+    External cron workers may strip launch-profile variables from os.environ.
+    Hermes retains the routed profile's .env in its task-local secret scope.
+    Honour its missing-scope guard; falling back after that guard would reuse
+    another profile's settings. Older hosts without this API retain env support.
+    """
+    try:
+        from agent.secret_scope import get_secret
+    except ImportError:
+        return os.environ.get(key, default)
+    return get_secret(key, default)
+
+
 def _parse_pattern_list(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
@@ -69,7 +84,7 @@ def _parse_arm_weights(raw: str, defaults: dict[str, float]) -> dict[str, float]
 
 
 def _parse_int_env(key: str, default: int) -> int:
-    raw = os.environ.get(key)
+    raw = read_lcm_env(key)
     if raw is None:
         return default
     try:
@@ -79,7 +94,7 @@ def _parse_int_env(key: str, default: int) -> int:
 
 
 def _parse_float_env(key: str, default: float) -> float:
-    raw = os.environ.get(key)
+    raw = read_lcm_env(key)
     if raw is None:
         return default
     try:
@@ -90,7 +105,7 @@ def _parse_float_env(key: str, default: float) -> float:
 
 
 def _parse_bool_env(key: str, default: bool) -> bool:
-    raw = os.environ.get(key)
+    raw = read_lcm_env(key)
     if raw is None:
         return default
     normalized = raw.strip().lower()
@@ -102,7 +117,7 @@ def _parse_bool_env(key: str, default: bool) -> bool:
 
 
 def _parse_str_env(key: str, default):
-    return os.environ.get(key, default)
+    return read_lcm_env(key, default)
 
 
 def _parse_int_env_with_source(
@@ -111,7 +126,7 @@ def _parse_int_env_with_source(
     *,
     default_source: str = "default",
 ) -> tuple[int, str, str | None]:
-    raw = os.environ.get(key)
+    raw = read_lcm_env(key)
     if raw is None:
         return default, default_source, None
     try:
@@ -126,7 +141,7 @@ def _parse_float_env_with_source(
     *,
     default_source: str = "default",
 ) -> tuple[float, str, str | None]:
-    raw = os.environ.get(key)
+    raw = read_lcm_env(key)
     if raw is None:
         return default, default_source, None
     try:
@@ -155,7 +170,12 @@ def _config_bool_disabled(value) -> bool:
 
 
 def _hermes_config_path() -> Path:
-    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    try:
+        from hermes_constants import get_hermes_home
+    except ImportError:
+        home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    else:
+        home = Path(get_hermes_home())
     return home / "config.yaml"
 
 
@@ -504,7 +524,7 @@ def _apply_lcm_yaml_overrides(
 ) -> None:
     """Resolve lcm.* after env parsing: valid env > YAML > host/default."""
     for spec in ENV_FIELD_SPECS:
-        raw_env = os.environ.get(spec.env_key)
+        raw_env = read_lcm_env(spec.env_key)
         env_valid = False
         if raw_env is not None:
             try:
@@ -543,7 +563,7 @@ def _apply_lcm_yaml_overrides(
         "ignore_message_patterns": "LCM_IGNORE_MESSAGE_PATTERNS",
     }
     for field_name, env_key in list_env_keys.items():
-        raw_env = os.environ.get(env_key)
+        raw_env = read_lcm_env(env_key)
         if field_name in section and raw_env is None:
             try:
                 setattr(config, field_name, _coerce_lcm_yaml_list(section[field_name]))
@@ -555,16 +575,16 @@ def _apply_lcm_yaml_overrides(
                 warnings.append(f"invalid config_yaml:lcm.{field_name} ignored")
         sources.setdefault(field_name, f"env:{env_key}" if raw_env is not None else "default")
 
-    if "recall_arm_weights" in section and os.environ.get("LCM_RECALL_ARM_WEIGHTS") is None:
+    if "recall_arm_weights" in section and read_lcm_env("LCM_RECALL_ARM_WEIGHTS") is None:
         try:
             config.recall_arm_weights = _coerce_lcm_yaml_arm_weights(section["recall_arm_weights"])
             sources["recall_arm_weights"] = "config_yaml:lcm.recall_arm_weights"
         except (ValueError, TypeError):
             warnings.append("invalid config_yaml:lcm.recall_arm_weights ignored")
-    sources.setdefault("recall_arm_weights", "env:LCM_RECALL_ARM_WEIGHTS" if os.environ.get("LCM_RECALL_ARM_WEIGHTS") is not None else "default")
+    sources.setdefault("recall_arm_weights", "env:LCM_RECALL_ARM_WEIGHTS" if read_lcm_env("LCM_RECALL_ARM_WEIGHTS") is not None else "default")
 
     age_env_key = "LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS"
-    raw_age_env = os.environ.get(age_env_key)
+    raw_age_env = read_lcm_env(age_env_key)
     age_env_valid = False
     if raw_age_env is not None:
         try:
@@ -1036,15 +1056,15 @@ class LCMConfig:
             setattr(c, spec.name, parser(spec.env_key, getattr(c, spec.name)))
 
         # Pattern-list overrides carry a source sidecar and stay explicit.
-        raw_sensitive_patterns = os.environ.get("LCM_SENSITIVE_PATTERNS")
+        raw_sensitive_patterns = read_lcm_env("LCM_SENSITIVE_PATTERNS")
         if raw_sensitive_patterns is not None:
             c.sensitive_patterns = _parse_pattern_list(raw_sensitive_patterns)
             c.sensitive_patterns_source = "env"
-        raw_summary_fallback_models = os.environ.get("LCM_SUMMARY_FALLBACK_MODELS")
+        raw_summary_fallback_models = read_lcm_env("LCM_SUMMARY_FALLBACK_MODELS")
         if raw_summary_fallback_models is not None:
             c.summary_fallback_models = _parse_pattern_list(raw_summary_fallback_models)
 
-        raw_max_age = os.environ.get("LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS")
+        raw_max_age = read_lcm_env("LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS")
         if raw_max_age is not None:
             try:
                 parsed_age = float(raw_max_age)
@@ -1053,23 +1073,23 @@ class LCMConfig:
             except (TypeError, ValueError):
                 pass
 
-        raw_arm_weights = os.environ.get("LCM_RECALL_ARM_WEIGHTS")
+        raw_arm_weights = read_lcm_env("LCM_RECALL_ARM_WEIGHTS")
         if raw_arm_weights is not None:
             c.recall_arm_weights = _parse_arm_weights(
                 raw_arm_weights, _DEFAULT_RECALL_ARM_WEIGHTS
             )
 
-        raw_ignore = os.environ.get("LCM_IGNORE_SESSION_PATTERNS")
+        raw_ignore = read_lcm_env("LCM_IGNORE_SESSION_PATTERNS")
         if raw_ignore is not None:
             c.ignore_session_patterns = _parse_pattern_list(raw_ignore)
             c.ignore_session_patterns_source = "env"
 
-        raw_stateless = os.environ.get("LCM_STATELESS_SESSION_PATTERNS")
+        raw_stateless = read_lcm_env("LCM_STATELESS_SESSION_PATTERNS")
         if raw_stateless is not None:
             c.stateless_session_patterns = _parse_pattern_list(raw_stateless)
             c.stateless_session_patterns_source = "env"
 
-        raw_ignore_messages = os.environ.get("LCM_IGNORE_MESSAGE_PATTERNS")
+        raw_ignore_messages = read_lcm_env("LCM_IGNORE_MESSAGE_PATTERNS")
         if raw_ignore_messages is not None:
             c.ignore_message_patterns = _parse_pattern_list(raw_ignore_messages)
             c.ignore_message_patterns_source = "env"

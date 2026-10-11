@@ -79,6 +79,28 @@ If you installed a symlink from a separate checkout:
 
 Restart Hermes after updating.
 
+## Upgrade to v1.0.0-rc.3
+
+Use the maintained [managed installation procedure](../INSTALL.md). Take a
+consistent SQLite backup first. This release adds a nullable `reasoning_content`
+column to schema v5; existing messages and summary graphs are preserved, and
+historical reasoning is not reconstructed. Models that echo reasoning may now
+reach the compression threshold sooner because the estimate includes text that
+was previously omitted. Provider-specific outbound sanitization remains Hermes'
+responsibility; the generic LCM estimate is conservative.
+
+LCM settings are resolved through the current Hermes secret scope when available,
+including external cron workers. YAML is read from the current task-local Hermes
+home. Precedence remains scoped `LCM_*` settings, explicit `lcm:` YAML, applicable
+host defaults, then plugin defaults. Scope errors are surfaced instead of silently
+reusing the launch profile. Old hosts without these APIs retain environment/home
+fallbacks. The existing ignore/stateless settings keep their original meanings.
+
+Reasoning persistence honors opt-in ingestion redaction and is excluded from FTS.
+Keep database/backup permissions restrictive. Rollback of data requires every
+writer stopped and the recorded pre-upgrade snapshot; never mix a restored main
+database with newer WAL/SHM files. See INSTALL.md for code/dependency rollback.
+
 ## Upgrade from v1.0.0-rc.1 to v1.0.0-rc.2
 
 1. While the current runtime is running, use `/lcm backup` to create a consistent online backup. If taking a filesystem copy instead, stop Hermes and every other SQLite writer first, then copy `lcm.db` with any `lcm.db-wal` and `lcm.db-shm` companions as one quiescent snapshot.
@@ -151,7 +173,7 @@ Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v1.0.0-rc.2 (15 tools)
+  ✓ hermes-lcm v1.0.0-rc.3 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm

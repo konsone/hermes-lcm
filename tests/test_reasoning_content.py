@@ -248,3 +248,35 @@ def test_engine_fresh_tail_keeps_reasoning_and_counts_it(tmp_path: Path):
         )
     finally:
         engine.shutdown()
+
+
+def test_reasoning_obeys_opt_in_sensitive_redaction(tmp_path):
+    original = {"role": "assistant", "content": "answer", "reasoning": "password=fixture-password-123"}
+    config = LCMConfig(sensitive_patterns_enabled=True, sensitive_patterns=["password_assignment"])
+    store = MessageStore(tmp_path / "lcm.db", ingest_protection_config=config)
+    try:
+        store.append("s", original)
+        store.append_batch("s", [dict(original, content="batch")])
+        rows = store.get_session_messages("s")
+        assert len(rows) == 2
+        assert all("fixture-password-123" not in row["reasoning_content"] for row in rows)
+        assert original["reasoning"] == "password=fixture-password-123"
+    finally:
+        store.close()
+
+
+def test_reasoning_sidecar_survives_reopen_and_search_row_alignment(tmp_path):
+    path = tmp_path / "lcm.db"
+    store = MessageStore(path)
+    store.append_batch("s", [{"role": "assistant", "content": "needle answer", "reasoning_content": REASONING}])
+    store.close()
+    store = MessageStore(path)
+    try:
+        row = store.get_session_messages("s")[0]
+        assert row["reasoning_content"] == REASONING
+        hits = store.search("needle", session_id="s")
+        assert len(hits) == 1
+        assert hits[0]["reasoning_content"] == REASONING
+        assert store.to_openai_msg(row)["reasoning_content"] == REASONING
+    finally:
+        store.close()

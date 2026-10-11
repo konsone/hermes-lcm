@@ -1393,6 +1393,11 @@ def protect_message_for_ingest(
     whole-message content still follows the existing threshold-based behavior.
     """
     msg = dict(message or {})
+    # Reasoning is now persisted too: apply the same opt-in redaction policy
+    # before either append path saves its sidecar, without touching the caller.
+    for key in ("reasoning_content", "reasoning"):
+        if isinstance(msg.get(key), str):
+            msg[key] = redact_sensitive_text(msg[key], config)
     role = str(msg.get("role") or "unknown")
     raw_content = msg.get("content")
     raw_normalized_content = normalize_content_value(raw_content)
