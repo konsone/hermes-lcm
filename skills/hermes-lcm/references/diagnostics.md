@@ -24,6 +24,17 @@ For cleanup, repair, source normalization, or rotate:
 
 Cleanup apply is separately feature-gated. Never infer permission to enable it from a diagnosis request.
 
+## Update procedure (live maintenance, 2026-09)
+
+1. Backup `lcm.db` first (SQLite backup API, never cp on a live WAL DB).
+2. Update the clone: currently a FORK (`wzgrx/hermes-lcm`, rc.2, carries the WAL contour guard + the POSIX lockfix equivalent + FTS fairness); upstream is abandoned — do not pull from upstream.
+3. Deploy/restart via Dokploy, verify `lcm_status` (`plugin_git_commit` must match the fork HEAD).
+- Pitfall: a compose deploy with NO parsed-config change is a silent no-op — send a label change only after `compose.update` actually landed it, and verify the gateway process start time moved before trusting a green deploy (see hermes-agent-update).
+- Pitfall: a standalone backfill script does NOT inherit gateway LCM_* env — set defaults explicitly (embeddings enabled/provider/model/base_url) in the script, else refusal 'embeddings are disabled'.
+- Pitfall: a timed-out/killed backfill run holds the backfill lease for its TTL (default 600 s) — the next attempt is refused 'another embedding backfill holds the lease'; wait out the TTL or override `LCM_EMBEDDING_BACKFILL_LEASE_TTL_S`.
+- Pitfall: cron `--script` accepts only a file under `/opt/data/scripts/` (relative name), not `/opt/data/work/`.
+- After a catch-up: verify `MAX(embedded_at)` moved to today, active chunk meta == vectors count (100%), inflight empty; dead inflight markers (chunk gone) delete by the checklist bullet in SKILL.md.
+
 ## Common states
 
 - Unbound status after restart: send a normal message, then check again.
