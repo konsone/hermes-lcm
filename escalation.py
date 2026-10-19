@@ -170,8 +170,14 @@ class SummarySpendGuard:
 
     def _record_call_locked(self, current_time: float) -> None:
         self._calls.append(current_time)
-        if len(self._calls) >= self.max_calls and self._backoff_until <= current_time:
-            self._backoff_until = current_time + max(0.0, self.backoff_seconds)
+        # Concurrent reservations take their timestamp before acquiring the
+        # lock, so two threads can append out of order. Keep the window sorted
+        # and anchor the backoff at the latest dispatch, not at whichever
+        # thread happened to record last.
+        self._calls.sort()
+        latest_dispatch = self._calls[-1]
+        if len(self._calls) >= self.max_calls and self._backoff_until <= latest_dispatch:
+            self._backoff_until = latest_dispatch + max(0.0, self.backoff_seconds)
             # Backoff is the penalty; start the window fresh so the guard allows
             # again once it elapses rather than double-blocking on the old count.
             self._calls.clear()
@@ -367,6 +373,13 @@ def _invoke_summary_llm_chain(
             )
             break
         try:
+            # Re-check the deadline at the dispatch boundary: the checks above
+            # run before the circuit and spend-guard decisions, and those can
+            # consume the remaining window. A call must not start after the
+            # deadline even with a zero timeout.
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.info("LCM summary deadline exhausted at dispatch")
+                break
             result = _invoke_summary_llm(
                 prompt,
                 max_tokens,
