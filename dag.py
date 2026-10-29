@@ -190,7 +190,15 @@ class SummaryDAG:
         return self._conn
 
     def _init_db(self):
-        self._conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
+        # Threads share this connection (check_same_thread=False). With the
+        # default statement cache, a reader can reuse a prepared statement while
+        # another thread is binding/stepping it (CPython #118172), which returns
+        # truncated or mismatched rows. Disable statement reuse here; the
+        # _db_lock contract still serializes writes.
+        self._conn = sqlite3.connect(
+            str(self.db_path), timeout=5.0, check_same_thread=False,
+            cached_statements=0,
+        )
         refuse_schema_version_too_new(self._conn)
         configure_connection(self._conn)
         self._conn.executescript("""

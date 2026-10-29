@@ -557,6 +557,12 @@ class MessageStore:
         # shared Python connection. Locking execute alone is insufficient:
         # simultaneous fetches can still trip sqlite3.InterfaceError even
         # when SQLite itself was built in serialized mode.
+        #
+        # The lock only covers callers that go through this class. Raw readers
+        # (`store.connection`, e.g. rollup_builder and diagnostics) run outside
+        # it, so the shared connection is also opened with cached_statements=0
+        # (CPython #118172): a cached prepared statement reused by one thread
+        # while another binds/steps it returns truncated or mismatched rows.
         self._write_lock = threading.RLock()
         self._contour_lock = threading.RLock()
         self._contour_ids: dict[str, tuple[int, int]] = {}
@@ -591,7 +597,14 @@ class MessageStore:
         if not self._is_memory_database:
             db_identity_before_open = self._identity_from_stat(os.stat(self.db_path))
             self._db_identity = db_identity_before_open
-        self._conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
+        # Statement caching is unsafe on a connection shared between threads:
+        # a cached statement can be reused while another thread binds/steps it
+        # (CPython #118172). Callers that bypass _write_lock via `connection`
+        # (rollup_builder, diagnostics) would otherwise see truncated rows.
+        self._conn = sqlite3.connect(
+            str(self.db_path), timeout=5.0, check_same_thread=False,
+            cached_statements=0,
+        )
         if db_identity_before_open is not None:
             try:
                 db_identity_after_open = self._identity_from_stat(os.stat(self.db_path))
@@ -676,7 +689,11 @@ class MessageStore:
     def _ensure_keeper_connection(self) -> None:
         if self._is_memory_database or self._keeper_conn is not None:
             return
-        conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
+        # Keeper connection: same statement-cache hazard as the primary one.
+        conn = sqlite3.connect(
+            str(self.db_path), timeout=5.0, check_same_thread=False,
+            cached_statements=0,
+        )
         try:
             detail = self._db_identity_changed_detail()
             if detail is not None:
