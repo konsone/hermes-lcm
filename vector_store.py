@@ -59,6 +59,10 @@ def _prescreen_deadline_expired(deadline: float | None, scanned_rows: int) -> bo
 # recorded as part of the canonical profile identity so a dtype/byteorder change
 # is detectable rather than silently reinterpreting stored bytes.
 _VECTOR_DTYPE = "float32"
+# Ids bound as SQL parameters instead of a temp table: a 2000-id batch costs
+# ~12 ms as an IN-list vs ~80 ms through CREATE TEMP + executemany + DROP.
+# Kept well under SQLITE_MAX_VARIABLE_NUMBER (32766 on the shipped build).
+_IN_LIST_ID_MAX = 5000
 _VECTOR_BYTEORDER = "little"
 # Opt-in int8 storage dtype (SPEC C1): vectors are stored per-vector
 # symmetrically quantized — ``dim`` signed int8 values followed by a little-endian
@@ -2726,6 +2730,17 @@ class VectorStore:
         dtype: str,
     ) -> tuple[list[int], list[str], list[str], Any]:
         """Decode one chunk candidate set into a NumPy matrix (no cache)."""
+        if dtype == _VECTOR_DTYPE:
+            # float32 wire format: build the matrix straight from the blobs.
+            # The per-row Python decode (``_decode_stored_vec`` -> list of floats)
+            # materializes one Python object per component; at 58k chunks x 1024
+            # that is ~60M objects and the dominant cost of a full-corpus scan
+            # (measured 11-17 s, which blew the 8 s recall budget and dropped the
+            # whole chunk arm). ``frombuffer`` reads the same bytes with zero
+            # per-element work.
+            return self._load_chunk_float32_matrix(
+                numpy, identity_hash, dim, chunk_ids
+            )
         rowids, loaded_ids, kinds, raw_vectors = self._load_chunk_vectors_for_ids(
             identity_hash, dim, chunk_ids, dtype
         )
@@ -2735,6 +2750,90 @@ class VectorStore:
             else numpy.empty((0, dim), dtype=numpy.float32)
         )
         return rowids, loaded_ids, kinds, matrix
+
+    def _fetch_chunk_rows_for_ids(
+        self, identity_hash: str, chunk_ids: Sequence[str]
+    ) -> list[Any]:
+        """Chunk vector rows for one batch of ids.
+
+        A bounded batch goes through an IN-list: staging the ids in a temp table
+        costs ~80 ms per 2000 ids (CREATE + executemany + DROP + join planning),
+        while the same batch as bound parameters costs ~12 ms — measured on the
+        live corpus (58k chunks), where the exact scan crosses ~30 batches and
+        the difference is the whole recall budget. SQLite's
+        ``SQLITE_MAX_VARIABLE_NUMBER`` (32766 here) comfortably covers a batch.
+        Larger candidate sets keep the temp-table path, which exists to dodge
+        that cap.
+        """
+        ids = [str(value) for value in chunk_ids]
+        if 0 < len(ids) <= _IN_LIST_ID_MAX:
+            placeholders = ",".join("?" * len(ids))
+            rows = self._conn.execute(
+                f"""
+                SELECT v.rowid, v.chunk_id, v.vec
+                FROM lcm_chunk_vectors v
+                JOIN lcm_chunk_meta m
+                  ON m.chunk_id = v.chunk_id AND m.identity_hash = v.identity_hash
+                WHERE v.identity_hash = ? AND m.archived = 0
+                  AND v.chunk_id IN ({placeholders})
+                """,
+                (identity_hash, *ids),
+            ).fetchall()
+        else:
+            with self._temp_id_table(ids) as table:
+                rows = self._conn.execute(
+                    f"""
+                    SELECT v.rowid, v.chunk_id, v.vec
+                    FROM {table} t
+                    JOIN lcm_chunk_vectors v
+                      ON v.chunk_id = t.id AND v.identity_hash = ?
+                    JOIN lcm_chunk_meta m
+                      ON m.chunk_id = v.chunk_id AND m.identity_hash = v.identity_hash
+                    WHERE m.archived = 0
+                    """,
+                    (identity_hash,),
+                ).fetchall()
+        # Rowid order, not the join plan's: batch order feeds the batch's matrix
+        # rows, so it must be stable across both branches.
+        return sorted(rows, key=lambda row: int(row["rowid"]))
+
+    def _load_chunk_float32_matrix(
+        self,
+        numpy: Any,
+        identity_hash: str,
+        dim: int,
+        chunk_ids: Sequence[str],
+    ) -> tuple[list[int], list[str], list[str], Any]:
+        """float32 vector rows as one contiguous ``(n, dim)`` float32 matrix.
+
+        Byte-identical results to ``_load_chunk_vectors_for_ids`` for the same
+        rows: the stored wire format is little-endian float32, already
+        normalized. Rows whose blob length does not match ``dim * 4`` are
+        skipped (same tolerance as the per-row decoder) rather than misread.
+        """
+        rowids: list[int] = []
+        out_ids: list[str] = []
+        kinds: list[str] = []
+        blobs: list[bytes] = []
+        if not chunk_ids:
+            return rowids, out_ids, kinds, numpy.empty((0, dim), dtype=numpy.float32)
+        rows = self._fetch_chunk_rows_for_ids(identity_hash, chunk_ids)
+        expected = int(dim) * 4
+        for row in rows:
+            try:
+                blob = bytes(row["vec"])
+            except (TypeError, ValueError):
+                continue
+            if not blob or len(blob) != expected:
+                continue
+            rowids.append(int(row["rowid"]))
+            out_ids.append(str(row["chunk_id"]))
+            kinds.append("chunk")
+            blobs.append(blob)
+        if not blobs:
+            return rowids, out_ids, kinds, numpy.empty((0, dim), dtype=numpy.float32)
+        matrix = numpy.frombuffer(b"".join(blobs), dtype=numpy.dtype("<f4"))
+        return rowids, out_ids, kinds, matrix.reshape(len(blobs), int(dim))
 
     def knn_chunks(
         self,
