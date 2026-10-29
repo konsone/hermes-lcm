@@ -219,6 +219,9 @@ _ASSERTION_EXTRACTION_PROCESS_SLOT = threading.BoundedSemaphore(1)
 _STORAGE_QUICKCHECK_CACHE_LOCK = threading.RLock()
 _STORAGE_QUICKCHECK_CACHE: dict[str, tuple[bool, str]] = {}
 _SIDECAR_GUARD_INTERVAL_SECONDS = 30.0
+# Bound for the one-shot startup pass that warms the chunk-vector pages: long
+# enough for a 240 MB corpus on a cold disk, short enough to never linger.
+_CHUNK_PREWARM_DEADLINE_S = 120.0
 
 
 def _make_contour_failure_listener(engine: "LCMEngine") -> Callable[[str], None]:
@@ -1201,12 +1204,45 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 _make_contour_failure_listener(self)
             )
             self._schedule_sidecar_guard()
+            self._schedule_chunk_vector_prewarm(db_path)
         except Exception:
             self._close_storage()
             raise
         finally:
             self._storage_binding = False
             self._storage_binding_thread_id = None
+
+    def _schedule_chunk_vector_prewarm(self, db_path: Path) -> None:
+        """Warm the OS page cache for the chunk vectors in the background.
+
+        The exact chunk KNN streams ~240 MB of float32 vectors; cold pages make
+        the scan I/O-bound (10-15 s) so the first recall after a start loses its
+        verbatim arm to the deadline, while every later recall takes the warm
+        path (~1.2 s). One background pass at startup closes that window.
+
+        Opt out with ``LCM_PREWARM_CHUNK_VECTORS=0``. Runs on its own read-only
+        connection, never blocks a turn and never raises.
+        """
+        if os.environ.get("LCM_PREWARM_CHUNK_VECTORS", "1").strip().lower() in {
+            "0", "false", "no", "off",
+        }:
+            return
+
+        def _run() -> None:
+            try:
+                from .vector_store import prewarm_chunk_vector_cache
+
+                result = prewarm_chunk_vector_cache(
+                    db_path, deadline=time.monotonic() + _CHUNK_PREWARM_DEADLINE_S
+                )
+                logger.debug("chunk vector prewarm: %s", result)
+            except Exception:  # noqa: BLE001 - warm-up must never break a start
+                logger.debug("chunk vector prewarm failed", exc_info=True)
+
+        thread = threading.Thread(
+            target=_run, name="lcm-chunk-vector-prewarm", daemon=True
+        )
+        thread.start()
 
     def _schedule_sidecar_guard(self) -> None:
         state = object.__getattribute__(self, "__dict__")

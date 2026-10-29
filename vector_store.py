@@ -237,6 +237,79 @@ def _decode_int8_vector(blob: bytes, dim: int) -> tuple[float, ...] | None:
     return tuple(value * scale for value in quantized)
 
 
+def prewarm_chunk_vector_cache(
+    db_path: Any,
+    *,
+    batch_rows: int = 2000,
+    min_rows: int = 2000,
+    deadline: float | None = None,
+) -> dict:
+    """Read the stored chunk vectors once so the OS page cache holds them.
+
+    The exact full-corpus KNN streams every float32 vector of the active chunk
+    identity (~240 MB at 58k chunks). When those pages are cold the scan is
+    I/O-bound at roughly 20 MB/s and cannot finish inside the recall budget
+    (measured 10-15 s cold vs ~1.2 s warm), so the first recall after a gateway
+    start silently loses its verbatim arm. Reading the same pages once in the
+    background at startup makes every subsequent recall take the warm path.
+
+    Runs on its own READ-ONLY connection: it must never touch the store's
+    shared connection or hold the write lock, and readers do not block writers
+    under WAL. Best effort — any failure returns a dict with the error and the
+    caller ignores it.
+    """
+    started = _monotonic()
+    result: dict = {"identity": None, "rows": 0, "skipped": None, "elapsed_ms": 0.0}
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        profile = conn.execute(
+            "SELECT identity_hash FROM lcm_embedding_profile "
+            "WHERE active = 1 AND archived_at IS NULL AND task = 'chunk' "
+            "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1"
+        ).fetchone()
+        if profile is None:
+            result["skipped"] = "no_active_chunk_profile"
+            return result
+        identity = str(profile["identity_hash"])
+        result["identity"] = identity
+        total = int(conn.execute(
+            "SELECT COUNT(*) FROM lcm_chunk_vectors WHERE identity_hash = ?",
+            (identity,),
+        ).fetchone()[0])
+        if total < max(1, int(min_rows)):
+            result["skipped"] = f"corpus_too_small ({total})"
+            return result
+        last_rowid = 0
+        rows_read = 0
+        while True:
+            if deadline is not None and _monotonic() >= deadline:
+                result["skipped"] = "deadline"
+                break
+            rows = conn.execute(
+                "SELECT rowid, vec FROM lcm_chunk_vectors "
+                "WHERE identity_hash = ? AND rowid > ? ORDER BY rowid LIMIT ?",
+                (identity, last_rowid, max(1, int(batch_rows))),
+            ).fetchall()
+            if not rows:
+                break
+            last_rowid = int(rows[-1]["rowid"])
+            rows_read += len(rows)
+        result["rows"] = rows_read
+        return result
+    except Exception as exc:  # noqa: BLE001 - best effort by contract
+        result["skipped"] = f"error: {type(exc).__name__}: {exc}"
+        return result
+    finally:
+        result["elapsed_ms"] = round((_monotonic() - started) * 1000.0, 1)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _pack_sign_bits(normalized: Sequence[float]) -> bytes:
     """Pack the sign bits of a vector MSB-first, ``ceil(dim/8)`` bytes.
 
